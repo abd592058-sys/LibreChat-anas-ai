@@ -1,0 +1,5 @@
+{
+  "name": "LibreChat",
+  "description": "LibreChat - An open source chat application with support for multiple AI models, agents, prompts, and code artifacts.",
+  "requestFramePermissions": []
+}

@@ -1,253 +1,631 @@
-import { memo, useEffect, useMemo } from 'react';
-import { useAtomValue } from 'jotai';
-import { useRecoilValue } from 'recoil';
-import { useForm } from 'react-hook-form';
-import { useParams } from 'react-router-dom';
-import { Constants } from 'librechat-data-provider';
-import { ChatScreen, QueuedTurnPortalProvider } from '@librechat/chat/components';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
+import { useNavigate, useParams } from 'react-router-dom';
 import {
-  submissionByIndex,
-  ChatSessionProvider,
-  useScrollbarGutterSeed,
-  ComposerRestoreProvider,
-  pendingApprovalActionFamily,
-} from '@librechat/chat/react';
-import type { TChatProject, TMessage } from 'librechat-data-provider';
-import type { ChatFormValues } from '~/common';
-import { AddedChatContext, ChatFormProvider, useChatContext, useFileMapContext } from '~/Providers';
-import { AssistantsMapContext, useAssistantsMapContext } from '~/Providers/AssistantsMapContext';
-import { AgentsMapContext, useAgentsMapContext } from '~/Providers/AgentsMapContext';
-import Footer, { useLandingFooter, useConfiguredFooter } from './Footer';
-import { useChatSettings } from '~/Providers/ChatSettingsContext';
-import ApprovalProvider from './Messages/Content/ApprovalContext';
-import { preloadMessages, renderMessages } from './Messages/load';
-import ConversationStarters from './Input/ConversationStarters';
-import ProjectBadge from '~/components/Projects/ProjectBadge';
-import { OwnerTextProvider } from './Messages/PrivateText';
-import { TargetContext } from '~/Providers/TargetContext';
-import useTarget from '~/hooks/Chat/target';
-import { useAddedResponse } from '~/hooks';
-import Presentation from './Presentation';
-import WelcomeBackdrop from './Backdrop';
-import ChatForm from './Input/ChatForm';
-import { TraceSurface } from './Trace';
-import Lia from '~/components/Lia';
-import AskHost from './AskHost';
-import Landing from './Landing';
-import Header from './Header';
-import store from '~/store';
+  ArrowUp,
+  Bot,
+  Menu,
+  Paperclip,
+  SlidersHorizontal,
+  Square,
+  X,
+} from 'lucide-react';
+import { api, streamChat } from '~/lib/api';
+import type {
+  Agent,
+  ArtifactData,
+  EndpointConfig,
+  Message,
+  MessageAttachment,
+  Preset,
+  PromptItem,
+} from '~/types';
+import { ArtifactPanel } from './ArtifactPanel';
+import { MessageItem } from './MessageItem';
+import { ModelSelector } from './ModelSelector';
+import { ParametersDrawer } from './ParametersDrawer';
 
 type ChatViewProps = {
-  index?: number;
-  project?: TChatProject;
-  /** The route is loading another conversation, or failed to. */
-  routePending?: boolean;
-  historyReady?: boolean;
+  sidebarOpen: boolean;
+  onOpenSidebar: () => void;
+  endpoints: EndpointConfig[];
+  agents: Agent[];
+  prompts: PromptItem[];
+  presets: Preset[];
+  onPresetsChanged: () => Promise<void>;
+  onConversationsChanged: () => Promise<void>;
+  initialAgentId?: string;
+  initialPromptText?: string;
+  onClearInitialPrompt?: () => void;
 };
 
-/**
- * The generic disclaimer and the policy links are the welcome screen's, where the deployment
- * places them; a deployment's own footer stays with the conversation that always showed it.
- */
-function renderFooter(placement: 'full' | 'composer' | 'band') {
-  if (placement === 'band') {
-    return <Footer configuredOnly />;
-  }
-  if (placement === 'composer') {
-    return (
-      <Footer className="text-text-muted hidden flex-wrap items-center justify-center gap-2 px-2 pb-2 text-center text-xs sm:flex" />
-    );
-  }
-  return <Footer />;
-}
+const QUICK_STARTERS = [
+  {
+    title: 'Interactive HTML Widget',
+    prompt:
+      'Build a clean, self-contained HTML artifact for a Pomodoro focus timer with start, pause, and reset controls.',
+  },
+  {
+    title: 'Architecture Tradeoffs',
+    prompt:
+      'Compare Server-Sent Events vs WebSockets for streaming LLM tokens in production web apps.',
+  },
+  {
+    title: 'Code Review Checklist',
+    prompt:
+      'Give me a practical security and reliability checklist for shipping a Node.js + Express REST API.',
+  },
+  {
+    title: 'SVG Diagram',
+    prompt:
+      'Create a clean SVG architecture diagram illustrating a browser client talking to an Express API gateway and AI model backends.',
+  },
+];
 
-function warmMessages() {
-  preloadMessages().catch(() => undefined);
-}
-
-function ChatViewPane({
-  index = 0,
-  project,
-  routePending = false,
-  conversationId,
-  messages,
-  isLoading,
-}: ChatViewProps & {
-  conversationId?: string;
-  messages: TMessage[] | null;
-  isLoading: boolean;
-}) {
-  const rootSubmission = useAtomValue(submissionByIndex(index));
-  const { saveDrafts } = useChatSettings();
-  const enterToSend = useRecoilValue(store.enterToSend);
-  const autoSendText = useRecoilValue(store.autoSendText);
-  const speechSettingsInitialized = useRecoilValue(store.speechSettingsInitialized);
-  const centerFormOnLanding = useRecoilValue(store.centerFormOnLanding);
-  const pendingAction = useAtomValue(
-    pendingApprovalActionFamily(conversationId ?? Constants.NEW_CONVO),
-  );
-
-  /** A routed conversation shows its messages as soon as they arrive, so the list's code
-   *  loads alongside them instead of after. */
-  const routedConversation = conversationId != null && conversationId !== Constants.NEW_CONVO;
-  useEffect(() => {
-    if (routedConversation) {
-      preloadMessages().catch(() => undefined);
-    }
-  }, [routedConversation]);
-
-  /** The welcome screen reserves the message column's scrollbar band before any
-   *  column exists to measure it (see the column classes in `ChatPane`). */
-  useScrollbarGutterSeed();
-
-  /** A conversation carries a footer only for configured content, and the
-   *  composer's clearance has to account for the bar when it does, including
-   *  before the config answers, so a cold load does not jump. */
-  const configuredFooter = useConfiguredFooter();
-  const landingFooter = useLandingFooter();
-
-  const methods = useForm<ChatFormValues>({
-    defaultValues: { text: '' },
-  });
-
-  const fileMap = useFileMapContext();
-  const chat = useChatContext();
-  const target = useTarget(chat.conversation, chat.setConversation);
-  const agentsMap = useAgentsMapContext();
-  const assistantsMap = useAssistantsMapContext();
-  const selectedAgents = useMemo(
-    () => (target.agent ? { ...agentsMap, [target.agent.id]: target.agent } : agentsMap),
-    [agentsMap, target.agent],
-  );
-  const selectedAssistants = useMemo(
-    () =>
-      target.assistant && chat.conversation?.endpoint
-        ? {
-            ...assistantsMap,
-            [chat.conversation.endpoint]: {
-              ...assistantsMap?.[chat.conversation.endpoint],
-              [target.assistant.id]: target.assistant,
-            },
-          }
-        : assistantsMap,
-    [assistantsMap, target.assistant, chat.conversation?.endpoint],
-  );
-  const addedChatHelpers = useAddedResponse();
-  const addedTarget = useTarget(addedChatHelpers.conversation, addedChatHelpers.setConversation);
-  const readiness = useMemo(
-    () => ({
-      ready: target.ready && (addedChatHelpers.conversation == null || addedTarget.ready),
-      pending: target.pending || (addedChatHelpers.conversation != null && addedTarget.pending),
-      failed: target.failed || (addedChatHelpers.conversation != null && addedTarget.failed),
-      retry: () => {
-        target.retry();
-        if (addedChatHelpers.conversation) addedTarget.retry();
-      },
-    }),
-    [target, addedTarget, addedChatHelpers.conversation],
-  );
-
-  return (
-    <TargetContext.Provider value={readiness}>
-      <AgentsMapContext.Provider value={selectedAgents}>
-        <AssistantsMapContext.Provider value={selectedAssistants}>
-          <AskHost saveDrafts={saveDrafts}>
-            <ChatFormProvider {...methods}>
-              <ComposerRestoreProvider>
-                <QueuedTurnPortalProvider>
-                  <AddedChatContext.Provider value={addedChatHelpers}>
-                    <ApprovalProvider pendingAction={pendingAction}>
-                      <Presentation routePending={routePending}>
-                        <TraceSurface conversationId={conversationId}>
-                          <ChatScreen
-                            index={index}
-                            conversationId={conversationId}
-                            messages={messages}
-                            fileMap={fileMap}
-                            isLoading={isLoading}
-                            project={project}
-                            landingFooter={landingFooter}
-                            configuredFooter={configuredFooter}
-                            renderHeader={({ parentConversationId, readOnly }) => (
-                              <Header
-                                parentConversationId={parentConversationId}
-                                readOnly={readOnly}
-                              />
-                            )}
-                            renderBadge={(projectId) => <ProjectBadge projectId={projectId} />}
-                            renderMessages={renderMessages}
-                            landing={<Landing centerFormOnLanding={centerFormOnLanding} />}
-                            renderColumn={(column, { isLanding }) => (
-                              <OwnerTextProvider
-                                messages={messages}
-                                conversationId={conversationId}
-                                isSubmitting={chat.isSubmitting}
-                              >
-                                {/* The welcome screen only, behind its column: a theme's
-                                backdrop covers the greeting and the composer together and
-                                goes with them on the first message. It paints nothing unless
-                                the theme asks and the build registers one. */}
-                                {isLanding && <WelcomeBackdrop />}
-                                {column}
-                              </OwnerTextProvider>
-                            )}
-                            starters={<ConversationStarters />}
-                            renderComposer={({ isLanding, footerBelow, project, placeholder }) => (
-                              /* Typing a first message is the cue that the list is next. */
-                              <div className="contents" onFocusCapture={warmMessages}>
-                                <ChatForm
-                                  index={index}
-                                  routePending={routePending}
-                                  placeholder={placeholder}
-                                  project={project}
-                                  isLandingPage={isLanding}
-                                  enterToSend={enterToSend}
-                                  autoSendText={autoSendText}
-                                  speechSettingsInitialized={speechSettingsInitialized}
-                                  footerBelow={footerBelow}
-                                  centerFormOnLanding={centerFormOnLanding}
-                                />
-                              </div>
-                            )}
-                            renderFooter={renderFooter}
-                            renderMascot={(bandRef, landing) => (
-                              <Lia
-                                bandRef={bandRef}
-                                landing={landing}
-                                submission={rootSubmission}
-                              />
-                            )}
-                          />
-                        </TraceSurface>
-                      </Presentation>
-                    </ApprovalProvider>
-                  </AddedChatContext.Provider>
-                </QueuedTurnPortalProvider>
-              </ComposerRestoreProvider>
-            </ChatFormProvider>
-          </AskHost>
-        </AssistantsMapContext.Provider>
-      </AgentsMapContext.Provider>
-    </TargetContext.Provider>
-  );
-}
-
-function ChatView(props: ChatViewProps) {
-  const { index = 0, historyReady = true } = props;
+export const ChatView: React.FC<ChatViewProps> = ({
+  sidebarOpen,
+  onOpenSidebar,
+  endpoints,
+  agents,
+  prompts,
+  presets,
+  onPresetsChanged,
+  onConversationsChanged,
+  initialAgentId,
+  initialPromptText,
+  onClearInitialPrompt,
+}) => {
   const { conversationId } = useParams();
+  const navigate = useNavigate();
+
+  const [messages, setMessages] = useState<Message[]>([]);
+  const [loadingConvo, setLoadingConvo] = useState(false);
+  const [input, setInput] = useState('');
+  const [attachments, setAttachments] = useState<MessageAttachment[]>([]);
+  const [isStreaming, setIsStreaming] = useState(false);
+  const [streamingMessageId, setStreamingMessageId] = useState<string | null>(null);
+  const [errorMsg, setErrorMsg] = useState<string | null>(null);
+
+  const [selectedEndpoint, setSelectedEndpoint] = useState('google');
+  const [selectedModel, setSelectedModel] = useState('gemini-2.5-flash');
+  const [selectedAgentId, setSelectedAgentId] = useState<string | undefined>(initialAgentId);
+
+  const [paramsOpen, setParamsOpen] = useState(false);
+  const [systemPrompt, setSystemPrompt] = useState('');
+  const [temperature, setTemperature] = useState(0.7);
+  const [topP, setTopP] = useState(0.95);
+  const [maxOutputTokens, setMaxOutputTokens] = useState(4096);
+
+  const [activeArtifact, setActiveArtifact] = useState<ArtifactData | null>(null);
+
+  const abortRef = useRef<AbortController | null>(null);
+  const bottomRef = useRef<HTMLDivElement>(null);
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
+  // Sync initial agent/prompt when routed from Marketplace or Prompts
+  useEffect(() => {
+    if (initialAgentId) {
+      const ag = agents.find((a) => a.id === initialAgentId);
+      setSelectedAgentId(initialAgentId);
+      if (ag) {
+        setSelectedEndpoint(ag.provider);
+        setSelectedModel(ag.model);
+      }
+    }
+  }, [initialAgentId, agents]);
+
+  useEffect(() => {
+    if (initialPromptText) {
+      setInput(initialPromptText);
+      onClearInitialPrompt?.();
+      textareaRef.current?.focus();
+    }
+  }, [initialPromptText, onClearInitialPrompt]);
+
+  // Load conversation when conversationId param changes
+  useEffect(() => {
+    if (!conversationId) {
+      setMessages([]);
+      setErrorMsg(null);
+      return;
+    }
+
+    let cancelled = false;
+    setLoadingConvo(true);
+    setErrorMsg(null);
+
+    api
+      .getConversation(conversationId)
+      .then((res) => {
+        if (cancelled) return;
+        setMessages(res.messages);
+        setSelectedEndpoint(res.conversation.endpoint || 'google');
+        setSelectedModel(res.conversation.model || 'gemini-2.5-flash');
+        setSelectedAgentId(res.conversation.agentId);
+        if (typeof res.conversation.systemPrompt === 'string') {
+          setSystemPrompt(res.conversation.systemPrompt);
+        }
+        if (typeof res.conversation.temperature === 'number') {
+          setTemperature(res.conversation.temperature);
+        }
+        if (typeof res.conversation.topP === 'number') {
+          setTopP(res.conversation.topP);
+        }
+      })
+      .catch((err) => {
+        if (!cancelled) {
+          setErrorMsg(err instanceof Error ? err.message : 'Failed to load conversation');
+        }
+      })
+      .finally(() => {
+        if (!cancelled) setLoadingConvo(false);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [conversationId]);
+
+  useEffect(() => {
+    bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
+  }, [messages.length, isStreaming]);
+
+  const slashSuggestions = useMemo(() => {
+    if (!input.startsWith('/')) return [];
+    const term = input.slice(1).toLowerCase();
+    if (term.includes(' ')) return [];
+    return prompts.filter(
+      (p) => p.command && (p.command.includes(term) || p.title.toLowerCase().includes(term)),
+    );
+  }, [input, prompts]);
+
+  const activeAgent = selectedAgentId ? agents.find((a) => a.id === selectedAgentId) : undefined;
+
+  const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = Array.from(e.target.files ?? []);
+    if (files.length === 0) return;
+
+    const loaded: MessageAttachment[] = [];
+    for (const file of files.slice(0, 5)) {
+      let content: string | undefined;
+      if (
+        file.type.startsWith('text/') ||
+        /\.(txt|md|json|ts|tsx|js|jsx|py|css|html|svg|yaml|yml|csv)$/i.test(file.name)
+      ) {
+        content = await file.text().catch(() => undefined);
+      }
+      loaded.push({
+        id: `${Date.now()}-${file.name}`,
+        name: file.name,
+        type: file.type || 'application/octet-stream',
+        size: file.size,
+        content,
+      });
+    }
+    setAttachments((prev) => [...prev, ...loaded]);
+    e.target.value = '';
+  };
+
+  const runStream = async (opts: {
+    text: string;
+    regenerateFromMessageId?: string;
+    editedMessageId?: string;
+  }) => {
+    if (isStreaming) return;
+    setErrorMsg(null);
+    setIsStreaming(true);
+
+    const controller = new AbortController();
+    abortRef.current = controller;
+
+    let createdConvoId = conversationId;
+    let assistantMsgId = '';
+
+    try {
+      await streamChat(
+        {
+          conversationId,
+          text: opts.text,
+          endpoint: selectedEndpoint,
+          model: selectedModel,
+          agentId: selectedAgentId,
+          systemPrompt: systemPrompt.trim() || undefined,
+          temperature,
+          topP,
+          maxOutputTokens,
+          attachments: attachments.length > 0 ? attachments : undefined,
+          regenerateFromMessageId: opts.regenerateFromMessageId,
+          editedMessageId: opts.editedMessageId,
+        },
+        {
+          signal: controller.signal,
+          onMeta: ({ conversation, userMessage, assistantMessageId }) => {
+            createdConvoId = conversation.conversationId;
+            assistantMsgId = assistantMessageId;
+            setStreamingMessageId(assistantMessageId);
+
+            const placeholderAssistant: Message = {
+              messageId: assistantMessageId,
+              conversationId: conversation.conversationId,
+              parentMessageId: userMessage?.messageId ?? null,
+              sender: activeAgent?.name || selectedModel,
+              text: '',
+              isCreatedByUser: false,
+              model: selectedModel,
+              endpoint: selectedEndpoint,
+              agentId: selectedAgentId,
+              createdAt: new Date().toISOString(),
+              updatedAt: new Date().toISOString(),
+            };
+
+            setMessages((prev) => {
+              let base = prev;
+              if (opts.editedMessageId) {
+                const idx = prev.findIndex((m) => m.messageId === opts.editedMessageId);
+                if (idx !== -1) base = prev.slice(0, idx);
+              } else if (opts.regenerateFromMessageId) {
+                const idx = prev.findIndex((m) => m.messageId === opts.regenerateFromMessageId);
+                if (idx !== -1) base = prev.slice(0, idx);
+              }
+              return userMessage
+                ? [...base, userMessage, placeholderAssistant]
+                : [...base, placeholderAssistant];
+            });
+          },
+          onDelta: (delta) => {
+            setMessages((prev) =>
+              prev.map((m) =>
+                m.messageId === assistantMsgId ? { ...m, text: `${m.text}${delta}` } : m,
+              ),
+            );
+          },
+          onDone: ({ conversation, assistantMessage }) => {
+            setMessages((prev) =>
+              prev.map((m) => (m.messageId === assistantMessage.messageId ? assistantMessage : m)),
+            );
+            onConversationsChanged();
+            if (!conversationId && conversation.conversationId) {
+              navigate(`/c/${conversation.conversationId}`, { replace: true });
+            }
+          },
+        },
+      );
+    } catch (err) {
+      if ((err as Error)?.name !== 'AbortError') {
+        setErrorMsg(err instanceof Error ? err.message : 'Streaming failed');
+      }
+      if (!conversationId && createdConvoId) {
+        navigate(`/c/${createdConvoId}`, { replace: true });
+      }
+    } finally {
+      setIsStreaming(false);
+      setStreamingMessageId(null);
+      abortRef.current = null;
+      setAttachments([]);
+    }
+  };
+
+  const handleSubmit = async (e?: React.FormEvent) => {
+    e?.preventDefault();
+    const trimmed = input.trim();
+    if (!trimmed || isStreaming) return;
+    setInput('');
+    if (textareaRef.current) {
+      textareaRef.current.style.height = 'auto';
+    }
+    await runStream({ text: trimmed });
+  };
+
+  const handleStop = () => {
+    abortRef.current?.abort();
+  };
+
+  const handleTextareaChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
+    setInput(e.target.value);
+    e.target.style.height = 'auto';
+    e.target.style.height = `${Math.min(e.target.scrollHeight, 200)}px`;
+  };
 
   return (
-    <ChatSessionProvider index={index} conversationId={conversationId} historyReady={historyReady}>
-      {({ messages, isLoading }) => (
-        <ChatViewPane
-          {...props}
-          conversationId={conversationId}
-          messages={messages}
-          isLoading={isLoading}
-        />
-      )}
-    </ChatSessionProvider>
-  );
-}
+    <div className="flex h-full min-w-0 flex-1 overflow-hidden">
+      {/* Main chat column */}
+      <div className="bg-canvas flex min-w-0 flex-1 flex-col">
+        {/* Top header */}
+        <header className="border-theme flex h-14 shrink-0 items-center justify-between gap-2 border-b px-3 md:px-4">
+          <div className="flex min-w-0 items-center gap-2">
+            {!sidebarOpen && (
+              <button
+                type="button"
+                onClick={onOpenSidebar}
+                title="Open sidebar"
+                className="text-secondary hover:text-primary hover:bg-surface-tertiary rounded-lg p-1.5 transition"
+              >
+                <Menu className="h-5 w-5" />
+              </button>
+            )}
+            <ModelSelector
+              endpoints={endpoints}
+              agents={agents}
+              presets={presets}
+              selectedEndpoint={selectedEndpoint}
+              selectedModel={selectedModel}
+              selectedAgentId={selectedAgentId}
+              onSelectModel={(ep, m) => {
+                setSelectedEndpoint(ep);
+                setSelectedModel(m);
+              }}
+              onSelectAgent={(agent) => {
+                if (!agent) {
+                  setSelectedAgentId(undefined);
+                  return;
+                }
+                setSelectedAgentId(agent.id);
+                setSelectedEndpoint(agent.provider);
+                setSelectedModel(agent.model);
+              }}
+              onApplyPreset={(preset) => {
+                setSelectedAgentId(undefined);
+                setSelectedEndpoint(preset.endpoint);
+                setSelectedModel(preset.model);
+                if (preset.systemPrompt) setSystemPrompt(preset.systemPrompt);
+                if (typeof preset.temperature === 'number') setTemperature(preset.temperature);
+                if (typeof preset.topP === 'number') setTopP(preset.topP);
+              }}
+            />
+          </div>
 
-export default memo(ChatView);
+          <button
+            type="button"
+            onClick={() => setParamsOpen((v) => !v)}
+            title="Conversation parameters"
+            className={`flex items-center gap-1.5 rounded-xl border px-2.5 py-1.5 text-xs font-medium transition ${
+              paramsOpen
+                ? 'border-emerald-500/50 bg-emerald-500/10 text-emerald-500'
+                : 'border-theme text-secondary hover:text-primary hover:bg-surface-tertiary'
+            }`}
+          >
+            <SlidersHorizontal className="h-3.5 w-3.5" />
+            <span className="hidden sm:inline">Parameters</span>
+          </button>
+        </header>
+
+        {/* Transcript / Landing */}
+        <div className="min-h-0 flex-1 overflow-y-auto">
+          {loadingConvo ? (
+            <div className="text-secondary flex h-full items-center justify-center text-sm">
+              Loading conversation...
+            </div>
+          ) : messages.length === 0 ? (
+            <div className="mx-auto flex h-full max-w-3xl flex-col items-center justify-center px-4 py-10">
+              {activeAgent ? (
+                <div className="mb-6 text-center">
+                  <div className="mx-auto mb-3 flex h-14 w-14 items-center justify-center rounded-2xl bg-emerald-500/15 text-emerald-500">
+                    <Bot className="h-7 w-7" />
+                  </div>
+                  <h1 className="text-primary text-2xl font-semibold">{activeAgent.name}</h1>
+                  <p className="text-secondary mx-auto mt-2 max-w-lg text-sm">
+                    {activeAgent.description}
+                  </p>
+                </div>
+              ) : (
+                <div className="mb-8 text-center">
+                  <img
+                    src="/assets/logo.svg"
+                    alt="LibreChat"
+                    className="mx-auto mb-4 h-12 w-12"
+                  />
+                  <h1 className="text-primary text-2xl font-semibold tracking-tight">
+                    How can I help you today?
+                  </h1>
+                  <p className="text-secondary mt-1.5 text-sm">
+                    Multi-model AI chat with Agents, Prompts, and interactive Code Artifacts
+                  </p>
+                </div>
+              )}
+
+              <div className="grid w-full grid-cols-1 gap-2.5 sm:grid-cols-2">
+                {(activeAgent?.starters?.length
+                  ? activeAgent.starters.map((s) => ({ title: 'Suggested Starter', prompt: s }))
+                  : QUICK_STARTERS
+                ).map((item, i) => (
+                  <button
+                    key={i}
+                    type="button"
+                    onClick={() => runStream({ text: item.prompt })}
+                    className="bg-surface-alt border-theme hover:border-theme-strong hover:bg-surface-tertiary/60 rounded-2xl border p-3.5 text-start transition"
+                  >
+                    <div className="text-primary text-xs font-semibold">{item.title}</div>
+                    <div className="text-secondary mt-1 line-clamp-2 text-xs">{item.prompt}</div>
+                  </button>
+                ))}
+              </div>
+            </div>
+          ) : (
+            <div className="pb-6">
+              {messages.map((m) => (
+                <MessageItem
+                  key={m.messageId}
+                  message={m}
+                  endpoints={endpoints}
+                  isStreaming={isStreaming && streamingMessageId === m.messageId}
+                  onRegenerate={(msgId) =>
+                    runStream({ text: '', regenerateFromMessageId: msgId })
+                  }
+                  onEditResubmit={(msgId, newText) =>
+                    runStream({ text: newText, editedMessageId: msgId })
+                  }
+                  onOpenArtifact={(artifact) => {
+                    setParamsOpen(false);
+                    setActiveArtifact(artifact);
+                  }}
+                />
+              ))}
+              <div ref={bottomRef} />
+            </div>
+          )}
+        </div>
+
+        {/* Error banner */}
+        {errorMsg && (
+          <div className="mx-auto mb-2 w-full max-w-3xl px-4">
+            <div className="flex items-center justify-between rounded-xl border border-red-500/30 bg-red-500/10 px-3.5 py-2 text-xs text-red-400">
+              <span>{errorMsg}</span>
+              <button type="button" onClick={() => setErrorMsg(null)}>
+                <X className="h-3.5 w-3.5" />
+              </button>
+            </div>
+          </div>
+        )}
+
+        {/* Composer */}
+        <div className="px-3 pb-4 pt-2 md:px-6">
+          <div className="relative mx-auto max-w-3xl">
+            {/* Slash prompt autocomplete */}
+            {slashSuggestions.length > 0 && (
+              <div className="bg-surface border-theme-strong absolute bottom-full start-0 z-20 mb-2 w-full max-w-md overflow-hidden rounded-2xl border shadow-xl">
+                <div className="text-tertiary border-theme border-b px-3 py-1.5 text-[11px] font-semibold uppercase">
+                  Prompt Commands
+                </div>
+                <div className="max-h-52 overflow-y-auto p-1">
+                  {slashSuggestions.map((p) => (
+                    <button
+                      key={p.id}
+                      type="button"
+                      onClick={() => {
+                        setInput(p.prompt);
+                        textareaRef.current?.focus();
+                      }}
+                      className="hover:bg-surface-tertiary flex w-full items-center justify-between rounded-xl px-3 py-2 text-start text-xs transition"
+                    >
+                      <div className="min-w-0">
+                        <div className="text-primary font-medium">{p.title}</div>
+                        <div className="text-tertiary truncate">{p.oneliner}</div>
+                      </div>
+                      <span className="bg-surface-secondary text-secondary ms-2 shrink-0 rounded px-1.5 py-0.5 font-mono">
+                        /{p.command}
+                      </span>
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            <form
+              onSubmit={handleSubmit}
+              className="bg-surface border-theme-strong focus-within:border-emerald-500/60 rounded-2xl border shadow-sm transition"
+            >
+              {attachments.length > 0 && (
+                <div className="flex flex-wrap gap-1.5 px-3.5 pt-2.5">
+                  {attachments.map((att) => (
+                    <span
+                      key={att.id}
+                      className="bg-surface-secondary border-theme text-secondary inline-flex items-center gap-1.5 rounded-lg border px-2 py-1 text-xs"
+                    >
+                      <span className="max-w-[160px] truncate">{att.name}</span>
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setAttachments((prev) => prev.filter((a) => a.id !== att.id))
+                        }
+                        className="hover:text-primary"
+                      >
+                        <X className="h-3 w-3" />
+                      </button>
+                    </span>
+                  ))}
+                </div>
+              )}
+
+              <textarea
+                ref={textareaRef}
+                value={input}
+                onChange={handleTextareaChange}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' && !e.shiftKey) {
+                    e.preventDefault();
+                    handleSubmit();
+                  }
+                }}
+                rows={1}
+                placeholder={`Message ${activeAgent?.name || selectedModel}... (type / for prompts)`}
+                className="text-primary placeholder:text-tertiary max-h-48 w-full resize-none bg-transparent px-4 py-3 text-sm focus:outline-none"
+              />
+
+              <div className="flex items-center justify-between px-3 pb-2.5">
+                <div className="flex items-center gap-1">
+                  <input
+                    ref={fileInputRef}
+                    type="file"
+                    multiple
+                    onChange={handleFileChange}
+                    className="hidden"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => fileInputRef.current?.click()}
+                    title="Attach text or code file"
+                    className="text-secondary hover:text-primary hover:bg-surface-tertiary rounded-lg p-1.5 transition"
+                  >
+                    <Paperclip className="h-4 w-4" />
+                  </button>
+                </div>
+
+                {isStreaming ? (
+                  <button
+                    type="button"
+                    onClick={handleStop}
+                    title="Stop generating"
+                    className="flex h-8 w-8 items-center justify-center rounded-full bg-red-500 text-white transition hover:bg-red-600"
+                  >
+                    <Square className="h-3.5 w-3.5 fill-current" />
+                  </button>
+                ) : (
+                  <button
+                    type="submit"
+                    disabled={!input.trim()}
+                    title="Send message"
+                    className="flex h-8 w-8 items-center justify-center rounded-full bg-emerald-600 text-white transition hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-40"
+                  >
+                    <ArrowUp className="h-4 w-4" />
+                  </button>
+                )}
+              </div>
+            </form>
+
+            <div className="text-tertiary mt-1.5 text-center text-[11px]">
+              LibreChat can make mistakes. Verify important information.
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {/* Side panels */}
+      {activeArtifact && (
+        <ArtifactPanel artifact={activeArtifact} onClose={() => setActiveArtifact(null)} />
+      )}
+      <ParametersDrawer
+        open={paramsOpen && !activeArtifact}
+        onClose={() => setParamsOpen(false)}
+        systemPrompt={systemPrompt}
+        temperature={temperature}
+        topP={topP}
+        maxOutputTokens={maxOutputTokens}
+        onChangeSystemPrompt={setSystemPrompt}
+        onChangeTemperature={setTemperature}
+        onChangeTopP={setTopP}
+        onChangeMaxOutputTokens={setMaxOutputTokens}
+        onSavePreset={async (title) => {
+          await api.createPreset({
+            title,
+            endpoint: selectedEndpoint,
+            model: selectedModel,
+            systemPrompt: systemPrompt.trim() || undefined,
+            temperature,
+            topP,
+          });
+          await onPresetsChanged();
+        }}
+      />
+    </div>
+  );
+};

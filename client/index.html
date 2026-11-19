@@ -9,7 +9,12 @@
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
     <meta
       name="description"
-      content="LibreChat - An open source chat application with support for multiple AI models"
+      content="LibreChat - An open source chat application with support for multiple AI models, agents, prompts, and code artifacts."
+    />
+    <meta property="og:title" content="LibreChat" />
+    <meta
+      property="og:description"
+      content="LibreChat - An open source chat application with support for multiple AI models, agents, prompts, and code artifacts."
     />
     <title>LibreChat</title>
     <link rel="icon" type="image/png" sizes="32x32" href="assets/favicon-32x32.png" />
@@ -437,12 +442,7 @@
         });
       })();
     </script>
-    <script
-      data-lc-rum-bootstrap="true"
-      type="module"
-      src="/src/lib/rum/bootstrap-entry.js"
-    ></script>
-    <script defer type="module" src="/src/main.jsx"></script>
+    <script defer type="module" src="/src/main.tsx"></script>
   </head>
   <body>
     <div id="root">
